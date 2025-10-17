@@ -1,0 +1,26 @@
+{
+    "manifest_version": 3,
+    "name": "KP Rescraper",
+    "version": "1.0.0",
+    "permissions": [
+        "scripting",
+        "webNavigation"
+    ],
+    "host_permissions": [
+        "https://www.kupujemprodajem.com/*"
+    ],
+    "background": {
+        "service_worker": "src/background/bg.js"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "https://www.kupujemprodajem.com/*"
+            ],
+            "js": [
+                "src/content/content.js"
+            ],
+            "run_at": "document_idle"
+        }
+    ]
+}
