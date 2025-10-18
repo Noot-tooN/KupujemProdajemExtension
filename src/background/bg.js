@@ -1,5 +1,6 @@
 const TARGET_PREFIX = "https://www.kupujemprodajem.com/pretraga";
-const TTL_MS = 60 * 60 * 1000;
+const TTL_MS = 24 * 60 * 60 * 1000; // 24 hour
+const PRUNE_THRESHOLD_MINUTES = 5;
 const latestTokenByTab = new Map();
 
 function newToken() {
@@ -56,6 +57,17 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "KP_STREAM") return;
 
   const tabId = port.sender?.tab?.id;
+
+  port.onMessage.addListener(async (_) => {
+    const lastPruneTime = await getLastPruneTs();
+
+    timeDiffMins = (Date.now() - lastPruneTime) / 60000;
+
+    if (timeDiffMins > PRUNE_THRESHOLD_MINUTES) {
+      await setLastPruneTs(Date.now());
+      pruneExpired();
+    }
+  });
 
   port.onMessage.addListener((msg) => {
     if (msg?.type !== "FETCH") return;
@@ -302,4 +314,65 @@ function idbDelete(key) {
         r.onerror = () => reject(r.error);
       })
   );
+}
+
+async function pruneExpired() {
+  const db = await idbOpen();
+  const tx = db.transaction(IDB_STORE, "readwrite");
+  const os = tx.objectStore(IDB_STORE);
+  const idx = os.index("expiresAt");
+  const now = Date.now();
+  const range = IDBKeyRange.upperBound(now);
+  await new Promise((resolve, reject) => {
+    const req = idx.openKeyCursor(range);
+    req.onsuccess = () => {
+      const cur = req.result;
+      if (!cur) return resolve();
+      console.log(`Deleting "${cur.primaryKey}"`);
+      os.delete(cur.primaryKey);
+      cur.continue();
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function storageGet(keys) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.get(keys, (res) => {
+      const err = chrome.runtime.lastError;
+      if (err) reject(err);
+      else resolve(res);
+    });
+  });
+}
+
+function storageSet(obj) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.set(obj, () => {
+      const err = chrome.runtime.lastError;
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+}
+
+const LAST_PRUNE_KEY = "kp:lastPruneTs";
+
+/** Returns the last prune timestamp (ms since epoch). 0 if never set. */
+async function getLastPruneTs() {
+  try {
+    const res = await storageGet([LAST_PRUNE_KEY]);
+    const ts = res[LAST_PRUNE_KEY];
+    if (!ts) {
+      return Date.now();
+    }
+    return ts;
+  } catch {
+    return Date.now();
+  }
+}
+
+/** Sets the last prune timestamp to the provided value (ms). */
+async function setLastPruneTs(tsMs) {
+  await storageSet({ [LAST_PRUNE_KEY]: tsMs });
 }
