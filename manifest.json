@@ -4,7 +4,6 @@
     "version": "1.0.0",
     "description": "Vraca ocene na stranicu za pretragu zajedno sa usernameom oglasivaca",
     "permissions": [
-        "scripting",
         "webNavigation",
         "storage"
     ],
