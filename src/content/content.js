@@ -50,6 +50,7 @@ const idPrefix = "kpplaceholder";
 function generatePlaceholder(el, id, token) {
   const div = document.createElement("div");
   div.id = id;
+  div.style.textAlign = "left";
   div.classList = "placeholder";
   div.dataset.token = token;
 
