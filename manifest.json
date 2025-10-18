@@ -4,7 +4,8 @@
     "version": "1.0.0",
     "permissions": [
         "scripting",
-        "webNavigation"
+        "webNavigation",
+        "storage"
     ],
     "host_permissions": [
         "https://www.kupujemprodajem.com/*"

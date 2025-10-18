@@ -1,105 +1,34 @@
-// prove we can talk to background
-chrome.runtime.sendMessage({ type: "PING" }, (resp) => {
-  if (chrome.runtime.lastError) {
-    console.warn("[CS] PING error:", chrome.runtime.lastError.message);
-  } else {
-    console.log("[CS] PING ->", resp); // <-- expect {pong:true}
-  }
-});
+const port = chrome.runtime.connect({ name: "KP_STREAM" });
 
-// Option A: run when background pings us on URL changes
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg?.type === "RUN_SCRAPE") {
-    console.log("[CS] RUN_SCRAPE for", location.href);
-    runScrape();
-  }
+  if (msg?.type !== "START_SCRAPE") return;
+
+  initialize(msg.token)
+    .then(() => {
+      console.log("init done");
+    })
+    .catch((err) => {
+      console.log(err);
+    });
 });
 
-// Also run once when the script loads (first page open)
-setTimeout(runScrape, 300);
-
-function runScrape() {
-  if (!location.href.startsWith("https://www.kupujemprodajem.com/pretraga"))
-    return;
-
-  const urls = getAdDetailLinks();
-  if (!urls.length) return;
-
-  console.log("[CS] Sending FETCH_LINKS for", urls.length, "urls");
-  chrome.runtime.sendMessage(
-    { type: "FETCH_LINKS", urls },
-    (resp) => {
-      if (chrome.runtime.lastError) {
-        console.warn(
-          "[CS] FETCH_LINKS error:",
-          chrome.runtime.lastError.message
-        );
-        return;
-      }
-
-      // Extract info from HTML
-      const out = resp.results.map(({ url, html }) => {
-        const doc = new DOMParser().parseFromString(html, "text/html");
-        const username =
-          doc
-            .querySelector("[class^='UserSummary_userName_']")
-            ?.textContent?.trim() || "";
-
-        const likes =
-          +(
-            doc.querySelector("[class^='ReviewThumbButtons_positive']")
-              ?.textContent || ""
-          ).replace(/\D+/g, "") || 0;
-
-        const dislikes =
-          +(
-            doc.querySelector("[class^='ReviewThumbButtons_negative']")
-              ?.textContent || ""
-          ).replace(/\D+/g, "") || 0;
-
-        return { url, username, likes, dislikes };
-      });
-
-      // TODO: update DOM
-      for (const item of out) {
-        const linkObj = [...document.querySelectorAll("a[href]")].find((el) => {
-          const u = new URL(
-            el.getAttribute("href"),
-            "https://www.kupujemprodajem.com"
-          );
-          return u.href === item.url;
-        });
-
-        const parentCtx = closestClassStartsWith(linkObj, "AdItem_adHolder");
-        const adInfo = parentCtx.querySelector(
-          "[class^='AdItem_viewAndFavorite']"
-        );
-
-        createUsernameDiv(adInfo, item);
-        createLikesDiv(adInfo, item);
-        createDislikesDiv(adInfo, item);
-      }
-    }
-  );
-}
-
-function createUsernameDiv(target, data) {
+function createUsernameDiv(target, username) {
   const div = document.createElement("div");
-  div.textContent = `${data.username}`;
+  div.textContent = `${username}`;
   target.append(div);
 }
 
-function createLikesDiv(target, data) {
+function createLikesDiv(target, likes) {
   const div = document.createElement("div");
-  div.textContent = `${data.likes}`;
-  div.style.color = 'green';
+  div.textContent = `${likes}`;
+  div.style.color = "green";
   target.append(div);
 }
 
-function createDislikesDiv(target, data) {
+function createDislikesDiv(target, dislikes) {
   const div = document.createElement("div");
-  div.textContent = `${data.dislikes}`;
-  div.style.color = 'red';
+  div.textContent = `${dislikes}`;
+  div.style.color = "red";
   target.append(div);
 }
 
@@ -110,13 +39,254 @@ function closestClassStartsWith(el, prefix) {
   return null;
 }
 
-// Minimal link scraper (content only!)
-function getAdDetailLinks() {
-  return [...document.querySelectorAll("[class]")]
-    .filter((el) =>
-      [...el.classList].some((c) => c.startsWith("AdItem_adHolder"))
-    )
-    .map((el) => el.querySelector("a[href]"))
-    .filter(Boolean)
-    .map((a) => new URL(a.getAttribute("href"), location.href).href);
+function getAdItems() {
+  return [...document.querySelectorAll("[class^='AdItem_adHolder']")];
 }
+
+function getViewAndFavorite(el) {
+  return el.querySelector("[class^='AdItem_viewAndFavorite']");
+}
+
+const idPrefix = "kpplaceholder";
+
+function generatePlaceholder(el, id, token) {
+  const div = document.createElement("div");
+  div.id = id;
+  div.classList = "placeholder";
+  div.dataset.token = token;
+
+  generatePlaceholderSpinner(div);
+
+  el.append(div);
+}
+
+function generatePlaceholderSpinner(el) {
+  const size = 32;
+  const src =
+    "https://raw.githubusercontent.com/SamHerbert/SVG-Loaders/master/svg-loaders/puff.svg";
+  const color = "white";
+
+  const spinner = document.createElement("span");
+  spinner.setAttribute("role", "status");
+  spinner.setAttribute("aria-label", "loading");
+  spinner.className = "kp-loading-spinner"; // note: '=' not '=='
+
+  // Size & color
+  spinner.style.display = "inline-block";
+  spinner.style.width = `${size}px`;
+  spinner.style.height = `${size}px`;
+  spinner.style.backgroundColor = color; // change this to paint the spinner
+
+  // SVG as mask (works cross-origin)
+  spinner.style.webkitMask = `url("${src}") no-repeat center / contain`;
+  spinner.style.mask = `url("${src}") no-repeat center / contain`;
+
+  el.append(spinner);
+}
+
+function createPlaceholders(items, token) {
+  return items.map((it) => {
+    const viewAndFavorite = getViewAndFavorite(it);
+
+    if (viewAndFavorite == null) {
+      console.log("null view and favorite");
+      return;
+    }
+
+    const uuid = crypto.randomUUID();
+
+    const id = `${idPrefix}-${uuid}`;
+
+    generatePlaceholder(viewAndFavorite, id, token);
+
+    return {
+      ad: it,
+      id,
+    };
+  });
+}
+
+function extractLinks(items) {
+  return items
+    .map((it) => {
+      link = it.ad?.querySelector("a[href]")?.href;
+
+      return {
+        link,
+        id: it.id,
+      };
+    })
+    .filter((it) => {
+      return it.link != null;
+    });
+}
+
+function getDataFromHTML(html) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const username =
+    doc
+      .querySelector("[class^='UserSummary_userName_']")
+      ?.textContent?.trim() || "";
+
+  const likes =
+    +(
+      doc.querySelector("[class^='ReviewThumbButtons_positive']")
+        ?.textContent || ""
+    ).replace(/\D+/g, "") || 0;
+
+  const dislikes =
+    +(
+      doc.querySelector("[class^='ReviewThumbButtons_negative']")
+        ?.textContent || ""
+    ).replace(/\D+/g, "") || 0;
+
+  return { username, likes, dislikes };
+}
+
+port.onMessage.addListener((msg) => {
+  if (msg?.type !== "PROCESSING") return;
+  // if (msg.token !== currentToken) return; // ← ignore stale
+
+  const placeholder = document.querySelector(`#${msg.payload.id}`);
+
+  if (placeholder == null) {
+    console.log("placeholder is null!!!!");
+    return;
+  }
+
+  const spinner = placeholder.querySelector(".kp-loading-spinner");
+
+  if (spinner == null) {
+    console.log("spinner is null!!!!");
+    return;
+  }
+
+  spinner.style.backgroundColor = "yellow";
+});
+
+port.onMessage.addListener((msg) => {
+  if (msg?.type !== "CACHE_RESULT") return;
+  // if (msg.token !== currentToken) return; // ← ignore stale
+
+  const placeholder = document.querySelector(`#${msg.payload.id}`);
+
+  if (placeholder == null) {
+    console.log("placeholder is null!!!!");
+    return;
+  }
+
+  const spinner = placeholder.querySelector(".kp-loading-spinner");
+
+  if (spinner == null) {
+    console.log("spinner is null!!!!");
+    return;
+  }
+
+  spinner.remove();
+
+  createUsernameDiv(placeholder, msg.payload.response.username);
+  createLikesDiv(placeholder, msg.payload.response.likes);
+  createDislikesDiv(placeholder, msg.payload.response.dislikes);
+});
+
+port.onMessage.addListener((msg) => {
+  if (msg?.type !== "RESULT_ERROR") return;
+  // if (msg.token !== currentToken) return; // ← ignore stale
+
+  console.log(msg);
+});
+
+// listen for messages from background
+port.onMessage.addListener((msg) => {
+  if (msg?.type !== "RESULT") return;
+  // if (msg.token !== currentToken) return; // ← ignore stale
+
+  const placeholder = document.querySelector(`#${msg.payload.id}`);
+
+  if (placeholder == null) {
+    console.log("placeholder is null!!!!");
+    return;
+  }
+
+  const spinner = placeholder.querySelector(".kp-loading-spinner");
+
+  if (spinner == null) {
+    console.log("spinner is null!!!!");
+    return;
+  }
+
+  if (!msg?.payload?.response?.ok) {
+    console.log(msg.payload.response);
+    console.log("I AM HERE!!!!1");
+    spinner.style.backgroundColor = "red";
+    return;
+  }
+
+  const data = getDataFromHTML(msg.payload.response.html);
+
+  port.postMessage({
+    type: "SET_CACHE",
+    payload: {
+      url: msg.payload.response.url,
+      data,
+    },
+  });
+
+  spinner.remove();
+
+  createUsernameDiv(placeholder, data.username);
+  createLikesDiv(placeholder, data.likes);
+  createDislikesDiv(placeholder, data.dislikes);
+});
+
+async function initialize(token) {
+  if (!location.href.startsWith("https://www.kupujemprodajem.com/pretraga"))
+    return;
+
+  console.log("Waiting for price");
+  let items = null;
+  let item = null;
+  let ind = 0;
+  while (item == null) {
+    if (ind > 0) {
+      await sleep(100);
+    }
+
+    items = getAdItems();
+
+    if (items.length == 0) {
+      ind++;
+      continue;
+    }
+
+    const placeholder = items[0].querySelector(`[class='placeholder']`);
+    if (placeholder != null) {
+      ind++;
+      continue;
+    }
+
+    item = items[0].querySelector(`[class^='AdItem_price']`);
+    ind++;
+  }
+
+  console.log("Price found");
+
+  const uninitItems = items.filter((el) => {
+    const placeholder = el.querySelector(`[id^='${idPrefix}']`);
+    return placeholder == null;
+  });
+
+  if (uninitItems.length == 0) {
+    console.log("uninitItems.length is 0");
+    return;
+  }
+
+  console.log("creating placeholders");
+  const res = createPlaceholders(uninitItems, token);
+
+  const links = extractLinks(res);
+
+  port.postMessage({ type: "FETCH", payload: { links }, token: token });
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

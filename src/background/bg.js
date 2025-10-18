@@ -1,76 +1,244 @@
-console.log("[BG] service worker loaded"); // <-- you should see this in SW console after Reload
-
-chrome.runtime.onInstalled.addListener(() => {
-  console.log("[BG] onInstalled");
-});
-
-// URL-change notifier (Option A)
 const TARGET_PREFIX = "https://www.kupujemprodajem.com/pretraga";
-const lastRunByTab = new Map();
+const latestTokenByTab = new Map();
 
-function shouldRun(url) { return url.startsWith(TARGET_PREFIX); }
-function maybeNotify(tabId, url) {
-  if (!shouldRun(url)) return;
-  if (lastRunByTab.get(tabId) === url) return;
-  lastRunByTab.set(tabId, url);
-  console.log("[BG] notifying tab to RUN_SCRAPE for", url);
-  chrome.tabs.sendMessage(tabId, { type: "RUN_SCRAPE", url }).catch(() => {});
+function newToken() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
+
+function issueScrape(tabId, url) {
+  if (!url.startsWith(TARGET_PREFIX)) return;
+
+  const token = newToken();
+
+  latestTokenByTab.set(tabId, token);
+
+  // Tell the content script to begin its own "wait until ready then scrape" flow
+  chrome.tabs
+    .sendMessage(tabId, {
+      type: "START_SCRAPE",
+      url,
+      token,
+    })
+    .catch((err) => {
+      console.log(err);
+    });
+}
+
+// INITIATORS (top-frame only)
 chrome.webNavigation.onCommitted.addListener(({ tabId, frameId, url }) => {
   if (frameId !== 0) return;
-  maybeNotify(tabId, url);
-});
-chrome.webNavigation.onHistoryStateUpdated.addListener(({ tabId, frameId, url }) => {
-  if (frameId !== 0) return;
-  maybeNotify(tabId, url);
-});
-chrome.webNavigation.onReferenceFragmentUpdated.addListener(({ tabId, frameId, url }) => {
-  if (frameId !== 0) return;
-  maybeNotify(tabId, url);
-});
-chrome.tabs.onRemoved.addListener(tabId => lastRunByTab.delete(tabId));
-
-// --- Messaging diag + fetch handler ---
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  console.log("[BG] onMessage:", msg?.type); // <-- you should see this when content sends
-  if (msg?.type === "PING") {
-    sendResponse({ pong: true });
-    return; // sync reply; no need to return true
-  }
-  if (msg?.type === "FETCH_LINKS" && Array.isArray(msg.urls)) {
-    console.log("[BG] FETCH_LINKS count=", msg.urls.length);
-    fetchAll(msg.urls, 6).then(results => sendResponse({ results }));
-    return true; // keep port open for async reply
-  }
+  issueScrape(tabId, url);
 });
 
-async function fetchAll(urls, limit) {
-  const out = []; const q = urls.slice(); const running = new Set();
-  const pump = () => {
-    while (running.size < limit && q.length) {
-      const url = q.shift();
-      const p = fetchOne(url)
-        .then(r => out.push(r))
-        .catch(e => out.push({ url, ok:false, error:String(e) }))
-        .finally(() => { running.delete(p); pump(); });
-      running.add(p);
-    }
-  };
-  return new Promise(resolve => {
-    const tick = setInterval(() => {
-      pump();
-      if (!q.length && !running.size) { clearInterval(tick); resolve(out); }
-    }, 20);
+chrome.webNavigation.onHistoryStateUpdated.addListener(
+  ({ tabId, frameId, url }) => {
+    if (frameId !== 0) return;
+    issueScrape(tabId, url);
+  }
+);
+
+chrome.webNavigation.onReferenceFragmentUpdated.addListener(
+  ({ tabId, frameId, url }) => {
+    if (frameId !== 0) return;
+    issueScrape(tabId, url);
+  }
+);
+
+// Optional: also fire after full page load (classic navs)
+chrome.webNavigation.onCompleted.addListener(({ tabId, frameId, url }) => {
+  if (frameId !== 0) return;
+  issueScrape(tabId, url);
+});
+
+// FETCHERS
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "KP_STREAM") return;
+
+  const tabId = port.sender?.tab?.id;
+
+  port.onMessage.addListener((msg) => {
+    if (msg?.type !== "FETCH") return;
+    if (!Array.isArray(msg.payload.links)) return;
+
+    const latest = latestTokenByTab.get(tabId);
+
+    console.log(`latest token: ${latest}`);
+    console.log(`msg.token token: ${msg.token}`);
+
+    if (!latest || msg.token !== latest) return;
+
+    streamResults(msg.payload.links, port).catch((err) => {
+      console.log(err);
+    });
   });
+
+  port.onMessage.addListener((msg) => {
+    if (msg?.type !== "SET_CACHE") return;
+
+    putInCache(msg.payload.url, msg.payload.data, 60 * 60 * 1000).catch(
+      (err) => {
+        console.log(err);
+      }
+    );
+  });
+});
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const randInt = (max) => Math.floor(Math.random() * (max + 1));
+
+function postToPort(port, tabId, msgWithPayload) {
+  const token = latestTokenByTab.get(tabId);
+  if (!token) return; // tab navigated away
+
+  port.postMessage({ ...msgWithPayload, token });
+}
+
+async function streamResults(
+  links,
+  port,
+  { concurrency = 1, stutterMs = 500, jitterMs = 250 } = {}
+) {
+  if (!Array.isArray(links) || links.length === 0) return;
+
+  // Stop gracefully if the port disconnects
+  let alive = true;
+  const onDisconnect = () => (alive = false);
+  port.onDisconnect.addListener(onDisconnect);
+
+  const tabId = port.sender?.tab?.id; // ← needed to fetch latest token
+
+  try {
+    // ---- 1) Prime cache: check everything up front (in parallel) ----
+    const cacheChecks = await Promise.all(
+      links.map(async (item) => {
+        try {
+          const cached = await getFromCache(item.link);
+          return { item, cached };
+        } catch (e) {
+          // Treat cache errors as a miss (we'll try network later)
+          return { item, cached: null, cacheError: e };
+        }
+      })
+    );
+
+    if (!alive) return;
+
+    // ---- 2) Stream all cache hits immediately (no delay) ----
+    for (const { item, cached } of cacheChecks) {
+      if (!alive) break;
+      if (cached) {
+        postToPort(port, tabId, {
+          type: "CACHE_RESULT",
+          payload: { response: { ...cached }, id: item.id },
+        });
+      }
+    }
+
+    if (!alive) return;
+
+    // Figure out what still needs fetching
+    const pending = cacheChecks
+      .filter(({ cached }) => !cached)
+      .map(({ item }) => item);
+
+    if (pending.length === 0 || !alive) return;
+
+    // ---- 3) Process only misses with stagger + concurrency ----
+    let nextIndex = 0;
+
+    const worker = async () => {
+      while (alive) {
+        const myIndex = nextIndex++;
+        if (myIndex >= pending.length) break;
+
+        const item = pending[myIndex];
+
+        try {
+          // If your fetchOneWithCache() now has internal TTL logic, keep it.
+          // Even though we pre-checked, calling it is fine and keeps logic centralized.
+          postToPort(port, tabId, {
+            type: "PROCESSING",
+            payload: { id: item.id },
+          });
+          const res = await fetchOneWithCache(item.link);
+          if (!alive) break;
+          postToPort(port, tabId, {
+            type: "RESULT",
+            payload: { response: res, id: item.id },
+          });
+        } catch (err) {
+          if (!alive) break;
+          console.log(err);
+          postToPort(port, tabId, {
+            type: "RESULT_ERROR",
+            error: { message: String((err && err.message) || err) },
+          });
+        }
+
+        // stutter before the next pull (per worker)
+        await sleep(stutterMs + randInt(jitterMs));
+      }
+    };
+
+    const workers = Array.from(
+      { length: Math.min(concurrency, pending.length) },
+      worker
+    );
+    await Promise.allSettled(workers);
+  } finally {
+    // ---- 4) Cleanup ----
+    port.onDisconnect.removeListener(onDisconnect);
+  }
+}
+
+async function fetchOneWithCache(url) {
+  // Try cache
+  const cached = await getFromCache(url);
+  if (cached) return { ...cached, cached: true };
+
+  // Network fetch
+  const res = await fetchOne(url);
+
+  return res;
 }
 
 async function fetchOne(url) {
   const res = await fetch(url, { credentials: "include" });
   const html = await res.text();
 
-  // const doc = new DOMParser().parseFromString(html, 'text/html');
-  // console.log(doc.querySelectorAll("[class]"))
+  if (!res.ok) {
+    console.log("NOT OK!!!");
+    console.log(res);
+  }
 
-  // NOTE: keep parsing minimal until messaging works
   return { url, ok: res.ok, status: res.status, html };
+}
+
+const CACHE_PREFIX = "fetchCache:";
+
+function cacheKeyFor(url) {
+  return `${CACHE_PREFIX}${url}`;
+}
+
+async function getFromCache(url) {
+  const key = cacheKeyFor(url);
+  const obj = await chrome.storage.local.get(key);
+  const entry = obj[key];
+  if (!entry) return null;
+
+  // drop expired entries
+  if (Date.now() >= entry.expiresAt) {
+    await chrome.storage.local.remove(key);
+    return null;
+  }
+  return entry.value; // { url, ok, status, html }
+}
+
+async function putInCache(url, value, ttlMs) {
+  const key = cacheKeyFor(url);
+  const entry = {
+    value, // { url, ok, status, html }
+    expiresAt: Date.now() + ttlMs, // absolute expiry
+  };
+  await chrome.storage.local.set({ [key]: entry });
 }
