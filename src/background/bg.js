@@ -62,12 +62,9 @@ chrome.runtime.onConnect.addListener((port) => {
 
     const latest = latestTokenByTab.get(tabId);
 
-    console.log(`latest token: ${latest}`);
-    console.log(`msg.token token: ${msg.token}`);
-
     if (!latest || msg.token !== latest) return;
 
-    streamResults(msg.payload.links, port).catch((err) => {
+    streamResults(msg.payload.links, port, latest).catch((err) => {
       console.log(err);
     });
   });
@@ -86,8 +83,7 @@ chrome.runtime.onConnect.addListener((port) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const randInt = (max) => Math.floor(Math.random() * (max + 1));
 
-function postToPort(port, tabId, msgWithPayload) {
-  const token = latestTokenByTab.get(tabId);
+function postToPort(port, token, msgWithPayload) {
   if (!token) return; // tab navigated away
 
   port.postMessage({ ...msgWithPayload, token });
@@ -96,6 +92,7 @@ function postToPort(port, tabId, msgWithPayload) {
 async function streamResults(
   links,
   port,
+  token,
   { concurrency = 1, stutterMs = 500, jitterMs = 250 } = {}
 ) {
   if (!Array.isArray(links) || links.length === 0) return;
@@ -105,7 +102,8 @@ async function streamResults(
   const onDisconnect = () => (alive = false);
   port.onDisconnect.addListener(onDisconnect);
 
-  const tabId = port.sender?.tab?.id; // ← needed to fetch latest token
+  const tabId = port.sender?.tab?.id;
+  const stillLatest = () => latestTokenByTab.get(tabId) === token;
 
   try {
     // ---- 1) Prime cache: check everything up front (in parallel) ----
@@ -121,20 +119,20 @@ async function streamResults(
       })
     );
 
-    if (!alive) return;
+    if (!alive || !stillLatest()) return;
 
     // ---- 2) Stream all cache hits immediately (no delay) ----
     for (const { item, cached } of cacheChecks) {
-      if (!alive) break;
+      if (!alive || !stillLatest()) return;
       if (cached) {
-        postToPort(port, tabId, {
+        postToPort(port, token, {
           type: "CACHE_RESULT",
           payload: { response: { ...cached }, id: item.id },
         });
       }
     }
 
-    if (!alive) return;
+    if (!alive || !stillLatest()) return;
 
     // Figure out what still needs fetching
     const pending = cacheChecks
@@ -147,7 +145,7 @@ async function streamResults(
     let nextIndex = 0;
 
     const worker = async () => {
-      while (alive) {
+      while (alive && stillLatest()) {
         const myIndex = nextIndex++;
         if (myIndex >= pending.length) break;
 
@@ -156,20 +154,20 @@ async function streamResults(
         try {
           // If your fetchOneWithCache() now has internal TTL logic, keep it.
           // Even though we pre-checked, calling it is fine and keeps logic centralized.
-          postToPort(port, tabId, {
+          postToPort(port, token, {
             type: "PROCESSING",
             payload: { id: item.id },
           });
           const res = await fetchOneWithCache(item.link);
-          if (!alive) break;
-          postToPort(port, tabId, {
+          if (!alive || !stillLatest()) break;
+          postToPort(port, token, {
             type: "RESULT",
             payload: { response: res, id: item.id },
           });
         } catch (err) {
-          if (!alive) break;
+          if (!alive || !stillLatest()) break;
           console.log(err);
-          postToPort(port, tabId, {
+          postToPort(port, token, {
             type: "RESULT_ERROR",
             error: { message: String((err && err.message) || err) },
           });
