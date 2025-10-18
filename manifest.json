@@ -2,6 +2,7 @@
     "manifest_version": 3,
     "name": "KP Ocene",
     "version": "1.0.0",
+    "description": "Vraca ocene na stranicu za pretragu zajedno sa usernameom oglasivaca",
     "permissions": [
         "scripting",
         "webNavigation",
