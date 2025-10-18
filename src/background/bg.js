@@ -1,4 +1,5 @@
 const TARGET_PREFIX = "https://www.kupujemprodajem.com/pretraga";
+const TTL_MS = 60 * 60 * 1000;
 const latestTokenByTab = new Map();
 
 function newToken() {
@@ -72,11 +73,9 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onMessage.addListener((msg) => {
     if (msg?.type !== "SET_CACHE") return;
 
-    putInCache(msg.payload.url, msg.payload.data, 60 * 60 * 1000).catch(
-      (err) => {
-        console.log(err);
-      }
-    );
+    putInCache(msg.payload.url, msg.payload.data, TTL_MS).catch((err) => {
+      console.log(err);
+    });
   });
 });
 
@@ -218,25 +217,89 @@ function cacheKeyFor(url) {
   return `${CACHE_PREFIX}${url}`;
 }
 
-async function getFromCache(url) {
+async function getFromCache(url, ttl = TTL_MS) {
   const key = cacheKeyFor(url);
-  const obj = await chrome.storage.local.get(key);
-  const entry = obj[key];
-  if (!entry) return null;
+  const rec = await idbGet(key);
+  if (!rec) return null;
 
-  // drop expired entries
-  if (Date.now() >= entry.expiresAt) {
-    await chrome.storage.local.remove(key);
-    return null;
-  }
-  return entry.value; // { url, ok, status, html }
+  // Refresh the cache on hit
+  const updated = { ...rec, expiresAt: Date.now() + ttl };
+  await idbPut(updated);
+
+  return rec.value;
 }
 
 async function putInCache(url, value, ttlMs) {
   const key = cacheKeyFor(url);
-  const entry = {
-    value, // { url, ok, status, html }
-    expiresAt: Date.now() + ttlMs, // absolute expiry
+  const rec = {
+    key,
+    value,
+    expiresAt: Date.now() + ttlMs,
   };
-  await chrome.storage.local.set({ [key]: entry });
+  await idbPut(rec);
+}
+
+const IDB_DB_NAME = "kpCacheDB";
+const IDB_STORE = "cache";
+const IDB_VERSION = 1;
+
+let _dbPromise = null;
+// Open (or create) the DB
+function idbOpen() {
+  if (_dbPromise) return _dbPromise;
+
+  _dbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_DB_NAME, IDB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        const os = db.createObjectStore(IDB_STORE, { keyPath: "key" });
+        // index by expiresAt for optional pruning
+        os.createIndex("expiresAt", "expiresAt");
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+
+  return _dbPromise;
+}
+
+function idbGet(key) {
+  return idbOpen().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, "readonly");
+        const os = tx.objectStore(IDB_STORE);
+        const r = os.get(key);
+        r.onsuccess = () => resolve(r.result || null);
+        r.onerror = () => reject(r.error);
+      })
+  );
+}
+
+function idbPut(record) {
+  return idbOpen().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, "readwrite");
+        const os = tx.objectStore(IDB_STORE);
+        const r = os.put(record);
+        r.onsuccess = () => resolve();
+        r.onerror = () => reject(r.error);
+      })
+  );
+}
+
+function idbDelete(key) {
+  return idbOpen().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, "readwrite");
+        const os = tx.objectStore(IDB_STORE);
+        const r = os.delete(key);
+        r.onsuccess = () => resolve();
+        r.onerror = () => reject(r.error);
+      })
+  );
 }
