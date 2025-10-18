@@ -4,9 +4,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type !== "START_SCRAPE") return;
 
   initialize(msg.token)
-    .then(() => {
-      console.log("init done");
-    })
+    .then(() => {})
     .catch((err) => {
       console.log(err);
     });
@@ -89,7 +87,6 @@ function createPlaceholders(items, token) {
     const viewAndFavorite = getViewAndFavorite(it);
 
     if (viewAndFavorite == null) {
-      console.log("null view and favorite");
       return;
     }
 
@@ -150,14 +147,12 @@ port.onMessage.addListener((msg) => {
   const placeholder = document.querySelector(`#${msg.payload.id}`);
 
   if (placeholder == null) {
-    console.log("placeholder is null!!!!");
     return;
   }
 
   const spinner = placeholder.querySelector(".kp-loading-spinner");
 
   if (spinner == null) {
-    console.log("spinner is null!!!!");
     return;
   }
 
@@ -171,14 +166,12 @@ port.onMessage.addListener((msg) => {
   const placeholder = document.querySelector(`#${msg.payload.id}`);
 
   if (placeholder == null) {
-    console.log("placeholder is null!!!!");
     return;
   }
 
   const spinner = placeholder.querySelector(".kp-loading-spinner");
 
   if (spinner == null) {
-    console.log("spinner is null!!!!");
     return;
   }
 
@@ -191,7 +184,6 @@ port.onMessage.addListener((msg) => {
 
 port.onMessage.addListener((msg) => {
   if (msg?.type !== "RESULT_ERROR") return;
-  // if (msg.token !== currentToken) return; // ← ignore stale
 
   console.log(msg);
 });
@@ -204,20 +196,16 @@ port.onMessage.addListener((msg) => {
   const placeholder = document.querySelector(`#${msg.payload.id}`);
 
   if (placeholder == null) {
-    console.log("placeholder is null!!!!");
     return;
   }
 
   const spinner = placeholder.querySelector(".kp-loading-spinner");
 
   if (spinner == null) {
-    console.log("spinner is null!!!!");
     return;
   }
 
   if (!msg?.payload?.response?.ok) {
-    console.log(msg.payload.response);
-    console.log("I AM HERE!!!!1");
     spinner.style.backgroundColor = "red";
     return;
   }
@@ -243,7 +231,6 @@ async function initialize(token) {
   if (!location.href.startsWith("https://www.kupujemprodajem.com/pretraga"))
     return;
 
-  console.log("Waiting for price");
   let items = null;
   let item = null;
   let ind = 0;
@@ -269,19 +256,15 @@ async function initialize(token) {
     ind++;
   }
 
-  console.log("Price found");
-
   const uninitItems = items.filter((el) => {
     const placeholder = el.querySelector(`[id^='${idPrefix}']`);
     return placeholder == null;
   });
 
   if (uninitItems.length == 0) {
-    console.log("uninitItems.length is 0");
     return;
   }
 
-  console.log("creating placeholders");
   const res = createPlaceholders(uninitItems, token);
 
   const links = extractLinks(res);
